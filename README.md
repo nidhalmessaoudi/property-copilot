@@ -73,8 +73,9 @@ Current tools:
 - `getRentStatus`
 - `listUpcomingDeadlines`
 - `createTask`
+- `rentProperty`
 
-`createTask` is the first write action. It only creates an internal task and does not send email, SMS, or calendar events.
+`createTask` creates an internal follow-up task. `rentProperty` is the first composite workflow: it marks a property occupied, creates or links a tenant, creates a lease, and records the first rent charge. Neither action sends email, SMS, or calendar events.
 
 ## Demo data
 

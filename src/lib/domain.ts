@@ -1,6 +1,6 @@
 import type { SqliteDatabase } from "./db";
 import { getDb } from "./db";
-import { daysFromToday, todayDate } from "./format";
+import { dateFromToday, daysFromToday, todayDate } from "./format";
 import type { DashboardData, Deadline, Lease, Property, RentRecord, Task, Tenant } from "./types";
 
 function dbOrDefault(db?: SqliteDatabase) { return db ?? getDb(); }
@@ -61,6 +61,46 @@ export function getRentStatus(input: { tenantId?: string; tenantName?: string; s
 
 export function listTasks(db?: SqliteDatabase): Task[] {
   return dbOrDefault(db).prepare("SELECT t.id, t.title, t.description, t.due_date as dueDate, t.priority, t.status, t.tenant_id as tenantId, tn.name as tenantName, t.property_id as propertyId, p.name as propertyName, t.created_at as createdAt FROM tasks t LEFT JOIN tenants tn ON tn.id = t.tenant_id LEFT JOIN properties p ON p.id = t.property_id ORDER BY CASE t.status WHEN 'open' THEN 0 ELSE 1 END, t.due_date").all() as Task[];
+}
+
+export interface RentPropertyResult {
+  property: Property;
+  tenant: Tenant;
+  lease: Lease;
+  rentRecord: RentRecord;
+}
+
+export function rentProperty(input: { propertyId: string; tenantName: string; monthlyRent: number; email?: string; phone?: string; unit?: string; leaseEndDate?: string }, db?: SqliteDatabase): RentPropertyResult {
+  const database = dbOrDefault(db);
+  const property = getProperty(input.propertyId, database);
+  if (!property) throw new Error("The requested property was not found");
+
+  const existingTenant = database.prepare("SELECT id, property_id as propertyId, unit FROM tenants WHERE lower(name) = lower(?) LIMIT 1").get(input.tenantName) as { id: string; propertyId: string; unit: string } | undefined;
+  const tenantId = existingTenant?.id ?? `tenant-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const occupiedUnits = database.prepare("SELECT COUNT(*) as count FROM tenants WHERE property_id = ?").get(property.id) as { count: number };
+  const unit = input.unit ?? existingTenant?.unit ?? `Unit ${occupiedUnits.count + 1}`;
+  const leaseId = `lease-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const rentId = `rent-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const startDate = todayDate();
+  const endDate = input.leaseEndDate ?? dateFromToday(365);
+  const dueDate = dateFromToday(1);
+
+  const transaction = database.transaction(() => {
+    if (existingTenant) {
+      database.prepare("UPDATE tenants SET email = ?, phone = ?, property_id = ?, unit = ? WHERE id = ?").run(input.email ?? "", input.phone ?? "", property.id, unit, tenantId);
+    } else {
+      database.prepare("INSERT INTO tenants (id, name, email, phone, property_id, unit) VALUES (?, ?, ?, ?, ?, ?)").run(tenantId, input.tenantName, input.email ?? "", input.phone ?? "", property.id, unit);
+    }
+    database.prepare("INSERT INTO leases (id, tenant_id, property_id, unit, start_date, end_date, monthly_rent) VALUES (?, ?, ?, ?, ?, ?, ?)").run(leaseId, tenantId, property.id, unit, startDate, endDate, input.monthlyRent);
+    database.prepare("INSERT INTO rent_records (id, tenant_id, due_date, amount, paid_date) VALUES (?, ?, ?, ?, NULL)").run(rentId, tenantId, dueDate, input.monthlyRent);
+    database.prepare("UPDATE properties SET status = 'occupied', monthly_value = ? WHERE id = ?").run(input.monthlyRent, property.id);
+  });
+  transaction();
+
+  const tenant = getTenant(tenantId, database)!;
+  const lease = getLease({ leaseId }, database)!;
+  const rentRecord = getRentStatus({ tenantId }, database).find((record) => record.id === rentId)!;
+  return { property: getProperty(property.id, database)!, tenant, lease, rentRecord };
 }
 
 export function createTask(input: { title: string; description?: string; dueDate: string; priority?: "low" | "medium" | "high"; tenantId?: string; propertyId?: string }, db?: SqliteDatabase): Task {

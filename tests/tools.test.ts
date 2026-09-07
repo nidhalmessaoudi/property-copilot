@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createDatabase, type SqliteDatabase } from "../src/lib/db";
 import { executeTool } from "../src/lib/tools";
+import { dateFromToday } from "../src/lib/format";
 
 let db: SqliteDatabase | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -22,6 +23,15 @@ describe("copilot tools", () => {
   it("rejects task relationships that do not match", async () => {
     db = createDatabase(":memory:");
     await expect(executeTool("createTask", { title: "Wrong property", dueDate: "2099-01-01", tenantId: "tenant-john", propertyId: "prop-harbor" }, db)).rejects.toThrow("do not match");
+  });
+
+  it("rents an available property through one controlled application action", async () => {
+    db = createDatabase(":memory:");
+    const result = await executeTool("rentProperty", { propertyId: "Maple Court", tenantName: "Amin Samaali", monthlyRent: 5000 }, db) as { property: { status: string; monthlyValue: number }; tenant: { name: string }; lease: { monthlyRent: number }; rentRecord: { dueDate: string } };
+    expect(result.property).toEqual(expect.objectContaining({ status: "occupied", monthlyValue: 5000 }));
+    expect(result.tenant.name).toBe("Amin Samaali");
+    expect(result.lease.monthlyRent).toBe(5000);
+    expect(result.rentRecord.dueDate).toBe(dateFromToday(1));
   });
 
   it("creates a task without exposing database access to the caller", async () => {

@@ -14,7 +14,7 @@ export interface CopilotResult {
   mode: "gemini" | "demo";
 }
 
-const systemInstruction = `You are Property Copilot, a calm and precise assistant for a property manager. You have access to the user's actual properties, tenants, leases, rent records, and tasks through tools. Always use a tool for factual app data instead of guessing. Use the createTask tool only when the user explicitly asks you to create a task or follow-up. After receiving tool results, answer naturally with concise, useful detail. Mention important names, amounts, dates, and next steps. Today's date is ${dateFromToday(0)}. If a tool returns no records, say so clearly.`;
+const systemInstruction = `You are Property Copilot, a calm and precise assistant for a property manager. You have access to the user's actual properties, tenants, leases, rent records, and tasks through tools. Always use a tool for factual app data instead of guessing. When the user says an available property was rented, use rentProperty; it updates the property, creates or links the tenant, creates a lease, and records the first rent charge. If the same request asks for a follow-up task, call createTask after rentProperty using the returned tenant and property IDs. Use createTask for explicit task, reminder, follow-up, or todo requests. Do not refuse an operation when a matching application tool exists. After receiving tool results, answer naturally with concise, useful detail. Mention important names, amounts, dates, and next steps. Today's date is ${dateFromToday(0)}. If a tool returns no records, say so clearly.`;
 
 function geminiToolDefinitions(): FunctionDeclaration[] {
   return toolDefinitions.map((tool) => ({
@@ -69,7 +69,21 @@ async function runDemoCopilot(userMessage: string): Promise<CopilotResult> {
   const query = userMessage.toLowerCase();
   const activities: CopilotResult["activities"] = [];
   try {
-    const wantsTask = /\\b(create|add|schedule|make)\\b/.test(query) && /\\b(task|follow[\\s-]?up|reminder|todo)\\b/.test(query);
+    const wantsTask = /\b(create|add|schedule|make)\b/.test(query) && /\b(task|follow[\s-]?up|reminder|todo)\b/.test(query);
+    const wantsRental = /\b(rent|rented|lease|leased)\b/.test(query);
+    const propertyName = extractPropertyName(userMessage);
+    const rentalTenant = extractRentalTenant(userMessage);
+    const monthlyRent = extractMonthlyRent(userMessage);
+    if (wantsRental && propertyName && rentalTenant && monthlyRent) {
+      const rental = await executeTool("rentProperty", { propertyId: propertyName, tenantName: rentalTenant, monthlyRent }) as { property: { id: string; name: string }; tenant: { id: string; name: string }; rentRecord: { dueDate: string } };
+      activities.push({ tool: "rentProperty", success: true });
+      if (wantsTask) {
+        await executeTool("createTask", { title: `Collect rent from ${rental.tenant.name}`, description: `Collect the first monthly rent payment for ${rental.property.name}.`, dueDate: dateFromToday(1), priority: "high", tenantId: rental.tenant.id, propertyId: rental.property.id });
+        activities.push({ tool: "createTask", success: true });
+        return { message: `Done — I marked ${rental.property.name} as rented to ${rental.tenant.name} at $${monthlyRent.toLocaleString()} per month, created the lease and first rent charge due ${rental.rentRecord.dueDate}, and added a high-priority task to collect the money tomorrow.`, activities, mode: "demo" };
+      }
+      return { message: `Done — I marked ${rental.property.name} as rented to ${rental.tenant.name} at $${monthlyRent.toLocaleString()} per month, created the lease, and recorded the first rent charge due ${rental.rentRecord.dueDate}.`, activities, mode: "demo" };
+    }
     if (wantsTask) {
       const tenant = extractName(userMessage);
       const input = { title: tenant ? `Follow up with ${tenant} about overdue rent` : "Follow up on property management request", description: userMessage, dueDate: dateFromToday(3), priority: "high" as const, ...(tenant ? { tenantName: tenant } : {}) };
@@ -104,6 +118,20 @@ async function runDemoCopilot(userMessage: string): Promise<CopilotResult> {
 }
 
 function extractName(message: string) {
-  const known = ["John Carter", "Maya Patel", "Alex Rivera", "Sophia Williams", "John", "Maya", "Alex", "Sophia"];
+  const known = ["John Carter", "Maya Patel", "Alex Rivera", "Sophia Williams", "Amin Samaali", "John", "Maya", "Alex", "Sophia"];
   return known.find((name) => message.toLowerCase().includes(name.toLowerCase()));
+}
+
+function extractPropertyName(message: string) {
+  const known = ["Maple Court", "Elm Street Lofts", "Harbor View House"];
+  return known.find((name) => message.toLowerCase().includes(name.toLowerCase()));
+}
+
+function extractRentalTenant(message: string) {
+  return message.match(/\bto\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){1,2})\s+for\b/i)?.[1];
+}
+
+function extractMonthlyRent(message: string) {
+  const amount = message.match(/\b(?:for|at)\s+\$?([\d,]+)(?:\s*(?:usd|dollars?))?/i)?.[1];
+  return amount ? Number(amount.replace(/,/g, "")) : undefined;
 }
