@@ -1,5 +1,5 @@
-import { GoogleGenerativeAI, SchemaType, type Content, type FunctionDeclaration, type Part } from "@google/generative-ai";
-import { dateFromToday } from "./format";
+import { GoogleGenerativeAI, SchemaType, type FunctionDeclaration, type Part } from "@google/generative-ai";
+import { dateFromToday, formatCurrency, formatDate } from "./format";
 import { getTenant } from "./domain";
 import { executeTool, toolDefinitions } from "./tools";
 
@@ -14,7 +14,7 @@ export interface CopilotResult {
   mode: "gemini" | "demo";
 }
 
-const systemInstruction = `You are Property Copilot, a calm and precise assistant for a property manager. You have access to the user's actual properties, tenants, leases, rent records, and tasks through tools. Always use a tool for factual app data instead of guessing. When the user says an available property was rented, use rentProperty; it updates the property, creates or links the tenant, creates a lease, and records the first rent charge. If the same request asks for a follow-up task, call createTask after rentProperty using the returned tenant and property IDs. Use createTask for explicit task, reminder, follow-up, or todo requests. Do not refuse an operation when a matching application tool exists. After receiving tool results, answer naturally with concise, useful detail. Mention important names, amounts, dates, and next steps. Today's date is ${dateFromToday(0)}. If a tool returns no records, say so clearly.`;
+const systemInstruction = `You are Property Copilot, a calm and precise assistant for a property manager. You have access to the user's actual properties, tenants, leases, rent records, and tasks through tools. Always use a tool for factual app data instead of guessing. When the user says an available property was rented, use rentProperty; it updates the property, creates or links the tenant, creates a lease, and records the first rent charge. Use createTask for explicit task, reminder, follow-up, or todo requests. Call every tool needed for the user's request in your first response; the application will execute the selected tools and format the real results. Do not refuse an operation when a matching application tool exists. Today's date is ${dateFromToday(0)}. If a tool returns no records, say so clearly.`;
 
 function geminiToolDefinitions(): FunctionDeclaration[] {
   return toolDefinitions.map((tool) => ({
@@ -28,37 +28,46 @@ function geminiToolDefinitions(): FunctionDeclaration[] {
   })) as unknown as FunctionDeclaration[];
 }
 
+type ExecutedTool = { name: string; input: unknown; result?: unknown; error?: string };
+
 export async function runCopilot(userMessage: string): Promise<CopilotResult> {
   if (!process.env.GEMINI_API_KEY) return runDemoCopilot(userMessage);
   const activities: CopilotResult["activities"] = [];
+  const executed: ExecutedTool[] = [];
   try {
     const client = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = client.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-2.0-flash", systemInstruction });
-    let contents: Content[] = [{ role: "user", parts: [{ text: userMessage }] }];
-    for (let turn = 0; turn < 5; turn += 1) {
-      const response = await model.generateContent({ contents, tools: [{ functionDeclarations: geminiToolDefinitions() }] });
-      const candidate = response.response.candidates?.[0];
-      if (!candidate) throw new Error("Gemini returned no candidate response");
-      const parts = candidate.content.parts;
-      const calls = parts.filter((part): part is Part & { functionCall: { name: string; args?: Record<string, unknown> } } => Boolean("functionCall" in part && part.functionCall));
-      if (!calls.length) return { message: response.response.text(), activities, mode: "gemini" };
-      contents.push(candidate.content);
-      const functionParts: Part[] = [];
-      for (const call of calls) {
-        const input = call.functionCall.args ?? {};
-        try {
-          const result = await executeTool(call.functionCall.name, input);
-          activities.push({ tool: call.functionCall.name, success: true });
-          functionParts.push({ functionResponse: { name: call.functionCall.name, response: { result } } });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Tool execution failed";
-          activities.push({ tool: call.functionCall.name, success: false });
-          functionParts.push({ functionResponse: { name: call.functionCall.name, response: { error: message } } });
-        }
+    const model = client.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-2.5-flash-lite", systemInstruction });
+    const response = await model.generateContent({ contents: [{ role: "user", parts: [{ text: userMessage }] }], tools: [{ functionDeclarations: geminiToolDefinitions() }] });
+    const candidate = response.response.candidates?.[0];
+    if (!candidate) throw new Error("Gemini returned no candidate response");
+    const calls = candidate.content.parts.filter((part): part is Part & { functionCall: { name: string; args?: Record<string, unknown> } } => Boolean("functionCall" in part && part.functionCall));
+    if (!calls.length) return { message: response.response.text(), activities, mode: "gemini" };
+
+    for (const call of calls) {
+      const input = call.functionCall.args ?? {};
+      try {
+        const result = await executeTool(call.functionCall.name, input);
+        activities.push({ tool: call.functionCall.name, success: true });
+        executed.push({ name: call.functionCall.name, input, result });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Tool execution failed";
+        activities.push({ tool: call.functionCall.name, success: false });
+        executed.push({ name: call.functionCall.name, input, error: message });
       }
-      contents.push({ role: "function", parts: functionParts });
     }
-    throw new Error("Gemini reached the tool-call limit");
+
+    const rental = executed.find((tool) => tool.name === "rentProperty" && tool.result) as { result: { property: { id: string; name: string }; tenant: { id: string; name: string } } } | undefined;
+    if (rental && wantsTask(userMessage) && !executed.some((tool) => tool.name === "createTask")) {
+      try {
+        const result = await executeTool("createTask", { title: `Collect rent from ${rental.result.tenant.name}`, description: `Collect the first monthly rent payment for ${rental.result.property.name}.`, dueDate: dateFromToday(1), priority: "high", tenantId: rental.result.tenant.id, propertyId: rental.result.property.id });
+        activities.push({ tool: "createTask", success: true });
+        executed.push({ name: "createTask", input: {}, result });
+      } catch (error) {
+        activities.push({ tool: "createTask", success: false });
+      }
+    }
+
+    return { message: summarizeToolResults(executed), activities, mode: "gemini" };
   } catch (error) {
     console.error("Copilot error", error);
     return { message: "I couldn't reach Gemini right now. I haven't changed any data. Try again, or check your Gemini configuration.", activities, mode: "gemini" };
@@ -69,7 +78,7 @@ async function runDemoCopilot(userMessage: string): Promise<CopilotResult> {
   const query = userMessage.toLowerCase();
   const activities: CopilotResult["activities"] = [];
   try {
-    const wantsTask = /\b(create|add|schedule|make)\b/.test(query) && /\b(task|follow[\s-]?up|reminder|todo)\b/.test(query);
+    const taskRequested = wantsTask(userMessage);
     const wantsRental = /\b(rent|rented|lease|leased)\b/.test(query);
     const propertyName = extractPropertyName(userMessage);
     const rentalTenant = extractRentalTenant(userMessage);
@@ -77,14 +86,14 @@ async function runDemoCopilot(userMessage: string): Promise<CopilotResult> {
     if (wantsRental && propertyName && rentalTenant && monthlyRent) {
       const rental = await executeTool("rentProperty", { propertyId: propertyName, tenantName: rentalTenant, monthlyRent }) as { property: { id: string; name: string }; tenant: { id: string; name: string }; rentRecord: { dueDate: string } };
       activities.push({ tool: "rentProperty", success: true });
-      if (wantsTask) {
+      if (taskRequested) {
         await executeTool("createTask", { title: `Collect rent from ${rental.tenant.name}`, description: `Collect the first monthly rent payment for ${rental.property.name}.`, dueDate: dateFromToday(1), priority: "high", tenantId: rental.tenant.id, propertyId: rental.property.id });
         activities.push({ tool: "createTask", success: true });
         return { message: `Done — I marked ${rental.property.name} as rented to ${rental.tenant.name} at $${monthlyRent.toLocaleString()} per month, created the lease and first rent charge due ${rental.rentRecord.dueDate}, and added a high-priority task to collect the money tomorrow.`, activities, mode: "demo" };
       }
       return { message: `Done — I marked ${rental.property.name} as rented to ${rental.tenant.name} at $${monthlyRent.toLocaleString()} per month, created the lease, and recorded the first rent charge due ${rental.rentRecord.dueDate}.`, activities, mode: "demo" };
     }
-    if (wantsTask) {
+    if (taskRequested) {
       const tenant = extractName(userMessage);
       const input = { title: tenant ? `Follow up with ${tenant} about overdue rent` : "Follow up on property management request", description: userMessage, dueDate: dateFromToday(3), priority: "high" as const, ...(tenant ? { tenantName: tenant } : {}) };
       let tenantId: string | undefined;
@@ -115,6 +124,56 @@ async function runDemoCopilot(userMessage: string): Promise<CopilotResult> {
     console.error("Demo copilot error", error);
     return { message: "I couldn't complete that request. Please try again.", activities, mode: "demo" };
   }
+}
+
+function wantsTask(message: string) {
+  const query = message.toLowerCase();
+  return /\b(create|add|schedule|make)\b/.test(query) && /\b(task|follow[\s-]?up|reminder|todo)\b/.test(query);
+}
+
+function summarizeToolResults(executed: ExecutedTool[]) {
+  return executed.map((tool) => {
+    if (tool.error) return `I couldn't complete ${tool.name}.`;
+    switch (tool.name) {
+      case "listProperties": {
+        const properties = tool.result as { name: string; city: string; units: number; status: string; monthlyValue: number }[];
+        return properties.length ? `**Properties**\n${properties.map((property) => `- ${property.name} — ${property.city}, ${property.units} units, ${property.status}, ${formatCurrency(property.monthlyValue)}/mo`).join("\n")}` : "I couldn't find any properties.";
+      }
+      case "getProperty": {
+        const property = tool.result as { name: string; address: string; city: string; units: number; status: string; monthlyValue: number } | null;
+        return property ? `**${property.name}**\n- ${property.address}, ${property.city}\n- ${property.units} units · ${property.status} · ${formatCurrency(property.monthlyValue)}/mo` : "I couldn't find that property.";
+      }
+      case "listTenants": {
+        const tenants = tool.result as { name: string; propertyName?: string; unit: string }[];
+        return tenants.length ? `**Tenants**\n${tenants.map((tenant) => `- ${tenant.name} — ${tenant.propertyName ?? "Unassigned"}, Unit ${tenant.unit}`).join("\n")}` : "I couldn't find any tenants.";
+      }
+      case "getTenant": {
+        const tenant = tool.result as { name: string; propertyName?: string; unit: string; email: string } | null;
+        return tenant ? `**${tenant.name}**\n- ${tenant.propertyName ?? "Unassigned"}, Unit ${tenant.unit}\n- ${tenant.email || "No email on file"}` : "I couldn't find that tenant.";
+      }
+      case "getLease": {
+        const lease = tool.result as { tenantName?: string; propertyName?: string; unit: string; monthlyRent: number; endDate: string } | null;
+        return lease ? `**Lease**\n- ${lease.tenantName} at ${lease.propertyName}, Unit ${lease.unit}\n- ${formatCurrency(lease.monthlyRent)}/mo · ends ${formatDate(lease.endDate)}` : "I couldn't find that lease.";
+      }
+      case "getRentStatus": {
+        const rents = tool.result as { tenantName?: string; amount: number; status: string; dueDate: string }[];
+        return rents.length ? `**Rent status**\n${rents.map((rent) => `- ${rent.tenantName}: ${formatCurrency(rent.amount)} ${rent.status}, due ${formatDate(rent.dueDate)}`).join("\n")}` : "I couldn't find matching rent records.";
+      }
+      case "listUpcomingDeadlines": {
+        const deadlines = tool.result as { title: string; subtitle: string; daysAway: number }[];
+        return deadlines.length ? `**Upcoming**\n${deadlines.slice(0, 6).map((deadline) => `- ${deadline.title} — ${deadline.subtitle} (${deadline.daysAway === 0 ? "today" : deadline.daysAway < 0 ? `${Math.abs(deadline.daysAway)}d overdue` : `in ${deadline.daysAway}d`})`).join("\n")}` : "You have no upcoming deadlines.";
+      }
+      case "createTask": {
+        const task = tool.result as { title: string; dueDate: string; priority: string };
+        return `**Task created**\n- ${task.title}\n- Due ${formatDate(task.dueDate)} · ${task.priority} priority`;
+      }
+      case "rentProperty": {
+        const rental = tool.result as { property: { name: string }; tenant: { name: string }; lease: { monthlyRent: number }; rentRecord: { dueDate: string } };
+        return `**Rental updated**\n- ${rental.property.name} is now rented to ${rental.tenant.name}\n- ${formatCurrency(rental.lease.monthlyRent)}/mo · first rent due ${formatDate(rental.rentRecord.dueDate)}`;
+      }
+      default: return "I completed that request.";
+    }
+  }).join("\n\n");
 }
 
 function extractName(message: string) {
