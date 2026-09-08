@@ -16,7 +16,7 @@ export default function Workspace({ initialData }: { initialData: DashboardData 
   const [view, setView] = useState<View>("overview");
   const [chatOpen, setChatOpen] = useState(true);
   const [messages, setMessages] = useState<{ role: "user" | "assistant"; text: string; activities?: { tool: string; success: boolean }[]; mode?: string }[]>([
-    { role: "assistant", text: "Good morning, Alex. I’ve pulled together the signals that need your attention. What would you like to look into?" },
+    { role: "assistant", text: "Good morning, Nidhal. I’ve pulled together the signals that need your attention. What would you like to look into?" },
   ]);
   const today = useMemo(() => new Intl.DateTimeFormat("en-US", { weekday: "long", month: "short", day: "numeric" }).format(new Date()), []);
   const longToday = useMemo(() => new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric" }).format(new Date()), []);
@@ -48,11 +48,11 @@ export default function Workspace({ initialData }: { initialData: DashboardData 
         <NavItem icon="file" label="Leases" active={view === "leases"} onClick={() => setView("leases")} count={data.leases.filter((lease) => lease.status === "expiring").length} />
         <NavItem icon="check" label="Tasks" active={view === "tasks"} onClick={() => setView("tasks")} count={data.stats.openTasks} />
       </nav>
-      <div className="sidebar-bottom"><div className="help-card"><div className="help-icon"><Icon name="spark" size={16} /></div><strong>Meet your copilot</strong><p>Ask questions or turn a thought into a task.</p><button onClick={() => setChatOpen(true)}>Open assistant <Icon name="arrow" size={14} /></button></div><div className="user-chip"><div className="avatar">AC</div><div><strong>Alex Chen</strong><span>Property manager</span></div><span className="more">•••</span></div></div>
+      <div className="sidebar-bottom"><div className="help-card"><div className="help-icon"><Icon name="spark" size={16} /></div><strong>Meet your copilot</strong><p>Ask questions or turn a thought into a task.</p><button onClick={() => setChatOpen(true)}>Open assistant <Icon name="arrow" size={14} /></button></div><div className="user-chip"><div className="avatar">N</div><div><strong>Nidhal</strong><span>Property manager</span></div><span className="more">•••</span></div></div>
     </aside>
     <section className="content-area">
-      <header className="topbar"><div className="mobile-brand"><div className="brand-mark"><Icon name="spark" size={15} /></div><strong>property copilot</strong></div><div className="topbar-actions"><span className="status-dot" /> Local workspace <span className="divider" /><span className="today-label">{today}</span><div className="mini-avatar">AC</div></div></header>
-      <div className="main-scroll"><div className="page-heading"><div><p className="eyebrow">{longToday.toUpperCase()}</p><h1>{view === "overview" ? "Good morning, Alex" : view[0].toUpperCase() + view.slice(1)}</h1><p className="subheading">{view === "overview" ? "Here’s the pulse of your portfolio today." : `Keep your ${view} organized and moving forward.`}</p></div><button className="primary-button" onClick={() => setChatOpen(true)}><Icon name="spark" size={16} /> Ask copilot</button></div>
+      <header className="topbar"><div className="mobile-brand"><div className="brand-mark"><Icon name="spark" size={15} /></div><strong>property copilot</strong></div><div className="topbar-actions"><span className="status-dot" /> Local workspace <span className="divider" /><span className="today-label">{today}</span><div className="mini-avatar">N</div></div></header>
+      <div className="main-scroll"><div className="page-heading"><div><p className="eyebrow">{longToday.toUpperCase()}</p><h1>{view === "overview" ? "Good morning, Nidhal" : view[0].toUpperCase() + view.slice(1)}</h1><p className="subheading">{view === "overview" ? "Here’s the pulse of your portfolio today." : `Keep your ${view} organized and moving forward.`}</p></div><button className="primary-button" onClick={() => setChatOpen(true)}><Icon name="spark" size={16} /> Ask copilot</button></div>
         {view === "overview" ? <Overview data={data} onView={setView} /> : <CollectionView view={view} data={data} onOpenCopilot={() => setChatOpen(true)} />}
       </div>
     </section>
@@ -84,9 +84,27 @@ function TaskCard({ task }: { task: Task }) { return <div className={`task-card 
 function StatusPill({ label, tone }: { label: string; tone: string }) { return <span className={`status-pill ${tone}`}>{label}</span>; }
 function EmptyState({ text }: { text: string }) { return <div className="empty-state"><Icon name="check" size={22} /><span>{text}</span></div>; }
 
+function FormattedMessage({ text }: { text: string }) {
+  const blocks = text.split(/\n\s*\n/).filter(Boolean);
+  return <div className="formatted-message">{blocks.map((block, index) => {
+    const lines = block.split("\n").filter(Boolean);
+    const isList = lines.length > 0 && lines.every((line) => /^\s*[-*]\s+/.test(line));
+    if (isList) return <ul key={index}>{lines.map((line) => <li key={line}>{formatInline(line.replace(/^\s*[-*]\s+/, ""))}</li>)}</ul>;
+    return <p key={index}>{lines.map((line, lineIndex) => <span key={lineIndex}>{lineIndex > 0 && <br />}{formatInline(line)}</span>)}</p>;
+  })}</div>;
+}
+
+function formatInline(text: string) {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, index) => {
+    if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (part.startsWith("`") && part.endsWith("`")) return <code key={index}>{part.slice(1, -1)}</code>;
+    return part;
+  });
+}
+
 function CopilotPanel({ messages, onAsk, onClose }: { messages: { role: "user" | "assistant"; text: string; activities?: { tool: string; success: boolean }[]; mode?: string }[]; onAsk: (message: string) => Promise<void>; onClose: () => void }) {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const ask = async (message: string) => { setBusy(true); setInput(""); await onAsk(message); setBusy(false); };
-  return <aside className="copilot-panel" aria-label="Property Copilot assistant"><div className="copilot-header"><div className="copilot-title"><div className="copilot-mark"><Icon name="spark" size={17} /></div><div><strong>Property Copilot</strong><span><i /> Ready to help</span></div></div><button className="close-button" onClick={onClose} aria-label="Close copilot">×</button></div><div className="copilot-context"><span className="context-dot" /> Working with your workspace <span className="context-count">{messages.filter((m) => m.activities?.length).length} tool runs</span></div><div className="chat-messages">{messages.map((message, index) => <div className={`message ${message.role}`} key={`${message.role}-${index}`}><div className="message-avatar">{message.role === "assistant" ? <Icon name="spark" size={13} /> : "AC"}</div><div className="message-body"><p>{message.text}</p>{message.activities?.length ? <div className="activity"><span className="activity-check"><Icon name="check" size={11} /></span><span>{message.activities.some((activity) => activity.success) ? "Used" : "Could not use"} {message.activities.map((activity) => activity.tool).join(", ")}</span>{message.mode === "demo" && <em>demo mode</em>}</div> : null}</div></div>)}{busy && <div className="message assistant"><div className="message-avatar"><Icon name="spark" size={13} /></div><div className="typing"><span /><span /><span /></div></div>}</div><div className="suggestions">{suggestions.slice(0, 2).map((suggestion) => <button key={suggestion} onClick={() => ask(suggestion)} disabled={busy}>{suggestion}</button>)}</div><form className="chat-input" onSubmit={(event) => { event.preventDefault(); void ask(input); }}><input aria-label="Ask Property Copilot" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask anything about your portfolio..." disabled={busy} /><button type="submit" disabled={busy || !input.trim()} aria-label="Send"><Icon name="send" size={17} /></button><small>Copilot can create tasks, but always review important actions.</small></form></aside>;
+  return <aside className="copilot-panel" aria-label="Property Copilot assistant"><div className="copilot-header"><div className="copilot-title"><div className="copilot-mark"><Icon name="spark" size={17} /></div><div><strong>Property Copilot</strong><span><i /> Ready to help</span></div></div><button className="close-button" onClick={onClose} aria-label="Close copilot">×</button></div><div className="copilot-context"><span className="context-dot" /> Working with your workspace <span className="context-count">{messages.filter((m) => m.activities?.length).length} tool runs</span></div><div className="chat-messages">{messages.map((message, index) => <div className={`message ${message.role}`} key={`${message.role}-${index}`}><div className="message-avatar">{message.role === "assistant" ? <Icon name="spark" size={13} /> : "N"}</div><div className="message-body"><div className="message-bubble"><FormattedMessage text={message.text} /></div>{message.activities?.length ? <div className="activity"><span className="activity-check"><Icon name="check" size={11} /></span><span>{message.activities.some((activity) => activity.success) ? "Used" : "Could not use"} {message.activities.map((activity) => activity.tool).join(", ")}</span>{message.mode === "demo" && <em>demo mode</em>}</div> : null}</div></div>)}{busy && <div className="message assistant"><div className="message-avatar"><Icon name="spark" size={13} /></div><div className="typing"><span /><span /><span /></div></div>}</div><div className="suggestions">{suggestions.slice(0, 2).map((suggestion) => <button key={suggestion} onClick={() => ask(suggestion)} disabled={busy}>{suggestion}</button>)}</div><form className="chat-input" onSubmit={(event) => { event.preventDefault(); void ask(input); }}><input aria-label="Ask Property Copilot" value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask anything about your portfolio..." disabled={busy} /><button type="submit" disabled={busy || !input.trim()} aria-label="Send"><Icon name="send" size={17} /></button><small>Copilot can create tasks, but always review important actions.</small></form></aside>;
 }
